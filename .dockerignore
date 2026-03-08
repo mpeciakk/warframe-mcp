@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.git/
+docs/
+*.md
+!README.md
+test-scenarios.mjs
+*.js.map
