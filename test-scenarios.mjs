@@ -42,7 +42,7 @@ function callTool(toolName, args = {}) {
     setTimeout(() => {
       proc.stdin.end();
       proc.kill("SIGTERM");
-    }, 15000);
+    }, 20000);
 
     proc.on("close", () => {
       // Parse the second JSON-RPC response (tool/call result)
@@ -78,13 +78,15 @@ async function runTest(label, toolName, args) {
 
   if (result?.result?.content?.[0]?.text) {
     const text = result.result.content[0].text;
-    console.log(`\nRESPONSE (${elapsed}s):\n${text}`);
+    // Truncate very long outputs for readability
+    const display = text.length > 3000 ? text.substring(0, 3000) + "\n... [truncated]" : text;
+    console.log(`\nRESPONSE (${elapsed}s):\n${display}`);
     const isError = text.startsWith("Error") || text.startsWith("Could not");
-    console.log(`\nSTATUS: ${isError ? "⚠ RETURNED ERROR" : "✓ OK"}`);
+    console.log(`\nSTATUS: ${isError ? "WARNING - RETURNED ERROR" : "OK"}`);
     return !isError;
   } else if (result?.error) {
     console.log(`\nJSON-RPC ERROR (${elapsed}s):`, JSON.stringify(result.error, null, 2));
-    console.log(`\nSTATUS: ✗ FAIL`);
+    console.log(`\nSTATUS: FAIL`);
     return false;
   } else {
     console.log(`UNEXPECTED (${elapsed}s):`, JSON.stringify(result, null, 2).substring(0, 500));
@@ -92,94 +94,131 @@ async function runTest(label, toolName, args) {
   }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+// ── Test Definitions ─────────────────────────────────────────────────────────
+// Each test: [label, toolName, args]
+const TESTS = [
+  // ── Worldstate Tools ───────────────────────────────────────────────────────
+  ["World state (sortie, nightwave, steel path)",
+    "world_state", { sections: ["sortie", "nightwave", "steel_path"] }],
+
+  ["Active fissures (Lith tier)",
+    "active_fissures", { tier: "Lith" }],
+
+  ["Active Requiem fissures",
+    "active_fissures", { tier: "Requiem" }],
+
+  ["Baro Ki'Teer inventory",
+    "baro_kiteer", { show_worth_analysis: false }],
+
+  // ── Item Lookup Tools ──────────────────────────────────────────────────────
+  ["Lookup Warframe: Mesa",
+    "lookup_warframe", { names: ["Mesa"] }],
+
+  ["Lookup Warframe batch: Saryn, Wisp",
+    "lookup_warframe", { names: ["Saryn", "Wisp"] }],
+
+  ["Lookup Weapon: Nataruk",
+    "lookup_weapon", { names: ["Nataruk"] }],
+
+  ["Lookup Weapon batch: Ignis Wraith, Acceltra",
+    "lookup_weapon", { names: ["Ignis Wraith", "Acceltra"] }],
+
+  ["Lookup Mod: Umbral Intensify",
+    "lookup_mod", { names: ["Umbral Intensify"] }],
+
+  ["Lookup Mod batch: Serration, Split Chamber",
+    "lookup_mod", { names: ["Serration", "Split Chamber"] }],
+
+  ["Lookup Item: Neurodes",
+    "lookup_item", { names: ["Neurodes"] }],
+
+  // ── Market Tool ────────────────────────────────────────────────────────────
+  ["Market price: Bite",
+    "market_price_check", { item_names: ["Bite"] }],
+
+  ["Market price: Primed Continuity",
+    "market_price_check", { item_names: ["Primed Continuity"] }],
+
+  ["Market price batch: Condition Overload, Blind Rage",
+    "market_price_check", { item_names: ["Condition Overload", "Blind Rage"] }],
+
+  ["Market price: Umbral Intensify (untradeable - expect error)",
+    "market_price_check", { item_names: ["Umbral Intensify"] }],
+
+  // ── Drop Tools ─────────────────────────────────────────────────────────────
+  ["Search drops: Condition Overload",
+    "search_drops", { queries: ["Condition Overload"] }],
+
+  ["Relic drops: Lith B1",
+    "relic_drops", { relics: ["Lith B1"] }],
+
+  // ── Misc Lookup Tools ──────────────────────────────────────────────────────
+  ["Prime vault status: Mesa Prime",
+    "prime_vault_status", { name: "Mesa Prime" }],
+
+  ["Simaris target",
+    "simaris_target", {}],
+
+  ["Find enemy spawn: Nox",
+    "find_enemy_spawn", { enemy_name: "Nox" }],
+
+  // ── Build Tool ─────────────────────────────────────────────────────────────
+  ["Lookup builds: Mesa",
+    "lookup_builds", { names: ["Mesa"] }],
+
+  // ── Crafting Tools ─────────────────────────────────────────────────────────
+  ["Crafting requirements: Wukong Prime",
+    "crafting_requirements", { items: ["Wukong Prime"] }],
+
+  ["Crafting usage: Neurodes",
+    "crafting_usage", { items: ["Neurodes"] }],
+
+  // ── Farm Optimizer Tool ────────────────────────────────────────────────────
+  ["Farm route: Neurodes + Orokin Cell",
+    "farm_route_optimizer", { resources: ["Neurodes", "Orokin Cell"] }],
+
+  ["Farm route: Plastids + Polymer Bundle (survival preferred)",
+    "farm_route_optimizer", { resources: ["Plastids", "Polymer Bundle"], prefer_mission_type: "survival" }],
+
+  // ── Synergy Planner Tool ───────────────────────────────────────────────────
+  ["Task synergy planner (PC)",
+    "task_synergy_planner", {}],
+
+  // ── Color Palette Tool ─────────────────────────────────────────────────────
+  ["Color palette: gold (#FFD700)",
+    "color_palette_finder", { hex_color: "FFD700", limit: 5 }],
+
+  ["Color palette: red (#FF0000) in Classic palette only",
+    "color_palette_finder", { hex_color: "#FF0000", limit: 3, palette: "Classic" }],
+];
+
+// ── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
+  // Allow filtering: node test-scenarios.mjs [filter]
+  // e.g. node test-scenarios.mjs market   — runs only tests with "market" in the label
+  const filter = process.argv[2]?.toLowerCase();
+  const testsToRun = filter
+    ? TESTS.filter(([label]) => label.toLowerCase().includes(filter))
+    : TESTS;
+
+  if (filter) {
+    console.log(`Filter: "${filter}" — running ${testsToRun.length}/${TESTS.length} tests\n`);
+  }
+
   const results = [];
-
-  // Tier 1
-  results.push(await runTest(
-    "1: Market price for Bite mod",
-    "market_price_check", { item_name: "Bite" }
-  ));
-
-  results.push(await runTest(
-    "2: Prime vault status for Mesa Prime",
-    "prime_vault_status", { name: "Mesa Prime" }
-  ));
-
-  results.push(await runTest(
-    "3: World state (check for Kuva-related info)",
-    "world_state", { sections: ["sortie", "nightwave", "steel_path"] }
-  ));
-
-  // Note: Test 3 alt — active fissures filtered for Requiem relics
-  results.push(await runTest(
-    "3b: Active Requiem fissures",
-    "active_fissures", { tier: "Requiem" }
-  ));
-
-  results.push(await runTest(
-    "4: Simaris target",
-    "simaris_target", {}
-  ));
-
-  // Tier 2
-  results.push(await runTest(
-    "5a: Market price for Jahu",
-    "market_price_check", { item_name: "Jahu" }
-  ));
-
-  results.push(await runTest(
-    "5b: Active Requiem fissures (for Kuva farming)",
-    "active_fissures", { tier: "Requiem" }
-  ));
-
-  results.push(await runTest(
-    "6a: Baro Ki'Teer inventory",
-    "baro_kiteer", { show_worth_analysis: false }
-  ));
-
-  results.push(await runTest(
-    "6b: Market price for Primed Continuity",
-    "market_price_check", { item_name: "Primed Continuity" }
-  ));
-
-  results.push(await runTest(
-    "7a: Lookup Nataruk weapon stats",
-    "lookup_weapon", { name: "Nataruk" }
-  ));
-
-  results.push(await runTest(
-    "7b: Market price for Critical Delay",
-    "market_price_check", { item_name: "Critical Delay" }
-  ));
-
-  // Tier 3
-  results.push(await runTest(
-    "8a: Lookup Umbral Intensify mod",
-    "lookup_mod", { name: "Umbral Intensify" }
-  ));
-
-  results.push(await runTest(
-    "8b: Market price for Umbral Intensify (should fail — untradeable)",
-    "market_price_check", { item_name: "Umbral Intensify" }
-  ));
+  for (const [label, tool, args] of testsToRun) {
+    results.push({ label, ok: await runTest(label, tool, args) });
+  }
 
   // Summary
   console.log(`\n${"=".repeat(70)}`);
   console.log("SUMMARY");
   console.log("=".repeat(70));
-  const passed = results.filter(Boolean).length;
-  console.log(`${passed}/${results.length} tests returned data`);
-  const labels = [
-    "1:Market-Bite", "2:Vault-Mesa", "3:WorldState", "3b:RequiemFissures",
-    "4:Simaris", "5a:Market-Jahu", "5b:RequiemFissures2", "6a:Baro",
-    "6b:Market-PrimedCont", "7a:Nataruk", "7b:Market-CritDelay",
-    "8a:Mod-UmbralInt", "8b:Market-UmbralInt"
-  ];
-  labels.forEach((l, i) => {
-    console.log(`  ${results[i] ? "✓" : "✗"} ${l}`);
-  });
+  const passed = results.filter((r) => r.ok).length;
+  console.log(`${passed}/${results.length} tests returned data\n`);
+  for (const { label, ok } of results) {
+    console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}`);
+  }
 }
 
 main().catch(console.error);
